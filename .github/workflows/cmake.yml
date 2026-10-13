@@ -188,7 +188,8 @@ jobs:
           run: |
             pkg_add -u pkgin
             pkgin update
-            pkgin -y install cmake gcc15 ninja-build
-            export CXX="/usr/pkg/gcc15/bin/g++"
+            # NetBSD 11.0 binaries are built up to gcc14, gcc15 and gcc16 are not in the repository
+            pkgin -y install cmake gcc14 ninja-build
+            export CXX="/usr/pkg/gcc14/bin/g++"
             cmake -B build -DBUILD_TESTING=OFF
             cmake --build build --verbose
