@@ -3708,7 +3708,9 @@ namespace Npu {
 		}
 	}
 
-	//* Parse "NPU load:  Core0: 74%, Core1:  0%, Core2:  0%," into one value per core
+	//* Parse the debugfs load line into one value per core
+	//? The multi-core drivers label every core: "NPU load:  Core0: 74%, Core1:  0%, Core2:  0%,"
+	//? The single-core ones, such as the RV1126B, report that core on its own: "NPU load: 34%"
 	vector<long long> parse_rknpu_load(const string& raw) {
 		vector<long long> loads;
 		size_t pos = 0;
@@ -3727,6 +3729,19 @@ namespace Npu {
 			if (core_index >= loads.size()) loads.resize(core_index + 1, 0ll);
 			loads.at(core_index) = clamp(stoll(raw.substr(number_start, number_end - number_start)), 0ll, 100ll);
 			pos = number_end;
+		}
+
+		//? Without core labels the one value after the colon is the whole device, a single core
+		if (loads.empty()) {
+			const auto colon = raw.find(':');
+			if (colon != string::npos) {
+				const auto number_start = raw.find_first_of("0123456789", colon);
+				if (number_start != string::npos) {
+					size_t number_end = number_start;
+					while (number_end < raw.size() and std::isdigit(static_cast<unsigned char>(raw.at(number_end)))) number_end++;
+					loads.push_back(clamp(stoll(raw.substr(number_start, number_end - number_start)), 0ll, 100ll));
+				}
+			}
 		}
 		return loads;
 	}
