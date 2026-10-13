@@ -300,6 +300,9 @@ namespace Menu {
 			#ifdef GPU_SUPPORT
 				"Or \"gpu0\" through \"gpu5\" for GPU boxes.",
 			#endif
+			#ifdef NPU_SUPPORT
+				"Or \"npu0\" for the NPU box.",
+			#endif
 				"Separate values with whitespace.",
 				"",
 				"Toggle between presets with key \"p\"."},
@@ -904,6 +907,23 @@ namespace Menu {
 				"again will close the detailed view",
 				"and stop following the process."},
 		}
+	#ifdef NPU_SUPPORT
+		,{
+			{"graph_symbol_npu",
+				"Graph symbol to use for graphs in npu box.",
+				"",
+				"\"default\", \"braille\", \"block\" or \"tty\".",
+				"",
+				"\"default\" for the general default symbol.",},
+			{"shown_npus",
+				"Manually set which npu vendors to show.",
+				"",
+				"Available values are \"rockchip\".",
+				"Separate values with whitespace.",
+				"",
+				"A restart is required to apply changes."},
+		}
+	#endif
 	};
 
 	msgBox::msgBox() {}
@@ -1335,6 +1355,9 @@ static int optionsMenu(const string& key) {
 			{"show_gpu_info", std::cref(Config::show_gpu_values)},
 			{"graph_symbol_gpu", std::cref(Config::valid_graph_symbols_def)},
 		#endif
+		#ifdef NPU_SUPPORT
+			{"graph_symbol_npu", std::cref(Config::valid_graph_symbols_def)},
+		#endif
 		};
 		auto tty_mode = Config::getB("tty_mode");
 		auto vim_keys = Config::getB("vim_keys");
@@ -1471,11 +1494,8 @@ static int optionsMenu(const string& key) {
 			if (--selected_cat < 0) selected_cat = (int)categories.size() - 1;
 			page = selected = 0;
 		}
-#ifdef GPU_SUPPORT
-		else if (is_in(key, "1", "2", "3", "4", "5", "6") or key.starts_with("select_cat_")) {
-#else
-		else if (is_in(key, "1", "2", "3", "4", "5") or key.starts_with("select_cat_")) {
-#endif
+		else if (key.starts_with("select_cat_")
+			or (key.size() == 1 and isint(key) and key != "0" and key.back() - '0' <= (int)categories.size())) {
 		selected_cat = key.back() - '0' - 1;
 			page = selected = 0;
 		}
@@ -1622,34 +1642,36 @@ static int optionsMenu(const string& key) {
 
 			//? Category buttons
 			out += Mv::to(y+7, x+4);
+			vector<string> cat_names = {"general", "cpu"};
 		#ifdef GPU_SUPPORT
-			for (int i = 0; const auto& m : {"general", "cpu", "gpu", "mem", "net", "proc"}) {
-		#else
-			for (int i = 0; const auto& m : {"general", "cpu", "mem", "net", "proc"}) {
+			cat_names.push_back("gpu");
 		#endif
-				out += Fx::b + (i == selected_cat
+			cat_names.push_back("mem");
+			cat_names.push_back("net");
+			cat_names.push_back("proc");
+		#ifdef NPU_SUPPORT
+			cat_names.push_back("npu");
+		#endif
+			//? Spread the buttons over roughly the same width the fixed paddings used to give
+			int cat_text_width = 0;
+			for (const auto& m : cat_names) cat_text_width += (int)m.size() + 2;
+			const int cat_pad = max(2, (80 - cat_text_width) / (int)cat_names.size());
+			const int option_menu_tab_width = cat_text_width / (int)cat_names.size() + cat_pad;
+			for (size_t i = 0; i < cat_names.size(); i++) {
+				const auto& m = cat_names[i];
+				out += Fx::b + ((int)i == selected_cat
 						? Theme::c("hi_fg") + '[' + Theme::c("title") + m + Theme::c("hi_fg") + ']'
 						: Theme::c("hi_fg") + to_string(i + 1) + Theme::c("title") + m + ' ')
-				#ifdef GPU_SUPPORT
-					+ Mv::r(7);
-				#else
-					+ Mv::r(10);
-				#endif
+					+ Mv::r(cat_pad);
 
-#if !defined(GPU_SUPPORT)
-				constexpr static auto option_menu_tab_width = 15;
-#else
-				constexpr static auto option_menu_tab_width = 12;
-#endif
 				if (const auto button_name = fmt::format("select_cat_{}", i + 1); not editing and not mouse_mappings.contains(button_name)) {
 					mouse_mappings[button_name] = {
 						.line = y + 6,
-						.col = x + 2 + (option_menu_tab_width * i),
+						.col = x + 2 + (option_menu_tab_width * (int)i),
 						.height = 3,
 						.width = option_menu_tab_width,
 					};
 				}
-				i++;
 			}
 			if (pages > 1) {
 				out += Mv::to(y+6 + height - 1, x+2) + Theme::c("hi_fg") + Symbols::title_left_down + Fx::b + Symbols::up + Theme::c("title") + " page "

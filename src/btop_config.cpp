@@ -54,6 +54,9 @@ const vector<string> Config::valid_boxes = {
 #ifdef GPU_SUPPORT
 	,"gpu0", "gpu1", "gpu2", "gpu3", "gpu4", "gpu5"
 #endif
+#ifdef NPU_SUPPORT
+	,"npu0"
+#endif
 };
 const vector<string> Config::temp_scales = { "celsius", "fahrenheit", "kelvin", "rankine" };
 #ifdef __linux__
@@ -112,13 +115,16 @@ namespace Config {
 #ifdef GPU_SUPPORT
 		{"graph_symbol_gpu", 	"# Graph symbol to use for graphs in gpu box, \"default\", \"braille\", \"block\" or \"tty\"."},
 #endif
+#ifdef NPU_SUPPORT
+		{"graph_symbol_npu", 	"# Graph symbol to use for graphs in npu box, \"default\", \"braille\", \"block\" or \"tty\"."},
+#endif
 		{"graph_symbol_mem", 	"# Graph symbol to use for graphs in cpu box, \"default\", \"braille\", \"block\" or \"tty\"."},
 
 		{"graph_symbol_net", 	"# Graph symbol to use for graphs in cpu box, \"default\", \"braille\", \"block\" or \"tty\"."},
 
 		{"graph_symbol_proc", 	"# Graph symbol to use for graphs in cpu box, \"default\", \"braille\", \"block\" or \"tty\"."},
 
-		{"shown_boxes", 		"#* Manually set which boxes to show. Available values are \"cpu mem net proc\" and \"gpu0\" through \"gpu5\", separate values with whitespace."},
+		{"shown_boxes", 		"#* Manually set which boxes to show. Available values are \"cpu mem net proc\", \"gpu0\" through \"gpu5\" and \"npu0\", separate values with whitespace."},
 
 		{"update_ms", 			"#* Update time in milliseconds, recommended 2000 ms or above for better sample times for graphs."},
 
@@ -268,6 +274,9 @@ namespace Config {
 		{"custom_gpu_name4",	"#* Custom gpu4 model name, empty string to disable."},
 		{"custom_gpu_name5",	"#* Custom gpu5 model name, empty string to disable."},
 	#endif
+	#ifdef NPU_SUPPORT
+		{"shown_npus",			"#* Set which NPU vendors to show. Available values are \"rockchip\""},
+	#endif
 	};
 
 	std::unordered_map<std::string_view, string> strings = {
@@ -277,6 +286,9 @@ namespace Config {
 		{"disable_presets", "Off"},
 		{"presets", "cpu:1:default,proc:0:default cpu:0:default,mem:0:default,net:0:default cpu:0:block,net:0:tty"},
 		{"graph_symbol_cpu", "default"},
+	#ifdef NPU_SUPPORT
+		{"graph_symbol_npu", "default"},
+	#endif
 		{"graph_symbol_gpu", "default"},
 		{"graph_symbol_mem", "default"},
 		{"graph_symbol_net", "default"},
@@ -309,7 +321,10 @@ namespace Config {
 		{"custom_gpu_name4", ""},
 		{"custom_gpu_name5", ""},
 		{"show_gpu_info", "Auto"},
-		{"shown_gpus", "nvidia amd intel apple"}
+		{"shown_gpus", "nvidia amd intel apple"},
+	#endif
+	#ifdef NPU_SUPPORT
+		{"shown_npus", "rockchip"}
 	#endif
 	};
 	std::unordered_map<std::string_view, string> stringsTmp;
@@ -491,7 +506,7 @@ namespace Config {
 					validError = "Malformatted preset in config value presets!";
 					return false;
 				}
-				if (not is_in(vals.at(0), "cpu", "mem", "net", "proc", "gpu0", "gpu1", "gpu2", "gpu3", "gpu4", "gpu5")) {
+				if (not v_contains(valid_boxes, vals.at(0))) {
 					validError = "Invalid box name in config value presets!";
 					return false;
 				}
@@ -537,7 +552,13 @@ namespace Config {
 			}
 			if (vals.at(0).starts_with("gpu")) {
 				set("graph_symbol_gpu", vals.at(2));
-			} else {
+			}
+		#ifdef NPU_SUPPORT
+			else if (vals.at(0).starts_with("npu")) {
+				set("graph_symbol_npu", vals.at(2));
+			}
+		#endif
+			else {
 				set(strings.find("graph_symbol_" + vals.at(0))->first, vals.at(2));
 			}
 		}
@@ -730,6 +751,9 @@ namespace Config {
 				int gpu_num = stoi(box.substr(3)) + 1;
 				if (gpu_num > Gpu::count) return false;
 			}
+		#endif
+		#ifdef NPU_SUPPORT
+			if (box.starts_with("npu") and Npu::count <= 0) return false;
 		#endif
 		}
 		current_boxes = std::move(new_boxes);

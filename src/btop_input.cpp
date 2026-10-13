@@ -240,16 +240,26 @@ namespace Input {
 					auto intKey = std::atoi(key.data());
 				#ifdef GPU_SUPPORT
 					static const array<string, 10> boxes = {"gpu5", "cpu", "mem", "net", "proc", "gpu0", "gpu1", "gpu2", "gpu3", "gpu4"};
-					if ((intKey == 0 and Gpu::count < 5) or (intKey >= 5 and intKey - 4 > Gpu::count))
-						return;
+					const bool available = (intKey > 0 and intKey < 5)
+						or (intKey == 0 and Gpu::count >= 5)
+						or (intKey >= 5 and intKey - 4 <= Gpu::count);
 				#else
-				static const array<string, 10> boxes = {"", "cpu", "mem", "net", "proc"};
-					if (intKey == 0 or intKey > 4)
-						return;
+					static const array<string, 10> boxes = {"", "cpu", "mem", "net", "proc"};
+					const bool available = (intKey > 0 and intKey < 5);
 				#endif
+					//? The npu box sits after the gpu boxes in the accelerator digit range
+					const string box = (available ? boxes.at(intKey)
+				#ifdef NPU_SUPPORT
+						: (Npu::count > 0 and intKey == Npu::key_digit() ? "npu0" : "")
+				#else
+						: ""
+				#endif
+					);
+					if (box.empty()) return;
+
 					atomic_wait(Runner::active);
 
-					if (not Config::toggle_box(boxes.at(intKey))) {
+					if (not Config::toggle_box(box)) {
 						Menu::show(Menu::Menus::SizeError);
 						return;
 					}

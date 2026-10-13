@@ -1219,6 +1219,117 @@ namespace Gpu {
 }
 #endif
 
+#ifdef NPU_SUPPORT
+namespace Npu {
+	int min_width = 69, min_height = 7; //? Smallest terminal the stats box and the core rows both fit in
+	static const int stats_min_width = 41; //? Narrowest usable statistics box
+	int width = 41, height = 7, total_height = 0;
+	int x = 1, y = 1;
+	int b_width = 0, b_height = 0, b_x = 0, b_y = 0;
+	int core_graph_width = 0, core_meter_width = 0, graph_height = 0;
+	bool shown = false, redraw = true;
+	string box;
+	vector<Draw::Graph> core_graphs = {};
+	Draw::Graph total_graph = {}, temp_graph = {};
+	Draw::Meter core_meter = Draw::Meter{10, "cpu"};
+	Draw::Meter total_meter = Draw::Meter{10, "cpu"};
+
+	//* Rows the box needs: one per core plus the borders, the statistics rows and the total graph
+	int box_height() {
+		if (Npu::count <= 0) return 0;
+		return max(min_height, Npu::count + 6);
+	}
+
+	string draw(const npu_info& npu, bool force_redraw, bool data_same) {
+		if (Runner::stopping) return "";
+		if (force_redraw) redraw = true;
+
+		const auto tty_mode = Config::getB("tty_mode");
+		const auto& graph_symbol = (tty_mode ? "tty" : Config::getS("graph_symbol_npu"));
+		const auto& graph_bg = Symbols::graph_symbols.at((graph_symbol == "default" ? Config::getS("graph_symbol") + "_up" : graph_symbol + "_up")).at(6);
+		const auto& temp_scale = Config::getS("temp_scale");
+		const bool show_temps = npu.got_temp and Config::getB("check_temp");
+		const bool redraw_all = (data_same or redraw);
+		const int core_count = static_cast<int>(npu.core_percent.size());
+		const auto total = npu.total_percent.back();
+
+		//? The statistics box spends a row on utilization and one more when the voltage is known,
+		//? whatever is left over becomes the averaged graph
+		const int stats_rows = 1 + (npu.volt > 0 ? 1 : 0);
+		graph_height = max(0, b_height - 2 - stats_rows);
+
+		string out;
+		out.reserve(width * height);
+
+		//* Redraw elements not needed to be updated every cycle
+		if (redraw) {
+			out += box;
+
+			//? One graph per core, meters hold no state so a single one is shared
+			core_graphs.clear();
+			core_graphs.reserve(core_count);
+			for (int i = 0; i < core_count; i++)
+				core_graphs.emplace_back(core_graph_width, 1, "cpu", safeVal(npu.core_percent, i), graph_symbol, false, false);
+
+			core_meter = Draw::Meter{core_meter_width, "cpu"};
+			total_meter = Draw::Meter{min(14, max(3, b_width - 16)), "cpu"};
+			total_graph = Draw::Graph{max(0, b_width - 3), graph_height, "cpu", npu.total_percent, graph_symbol, false, false};
+			temp_graph = Draw::Graph{5, 1, "temp", npu.temp, graph_symbol, false, false, npu.temp_max, -23};
+		}
+
+		//? Per-core utilization, one row each with its own graph and meter
+		const int label_width = (core_count > 9 ? 6 : 5); // "NPU0 " or "NPU10 "
+		const int label_x = x + 1;
+		const int graph_x = label_x + label_width;
+		const int meter_x = graph_x + core_graph_width + 1;
+		const int percent_x = meter_x + core_meter_width + 1;
+		for (int i = 0; i < core_count and i < height - 2; i++) {
+			const auto core_percent = safeVal(npu.core_percent, i).back();
+			const auto core_color = Theme::g("cpu").at(clamp(core_percent, 0ll, 100ll));
+			out += Mv::to(y + 1 + i, label_x) + Theme::c("main_fg") + Fx::b + "NPU" + to_string(i) + Fx::ub;
+			if (core_graph_width > 0 and i < static_cast<int>(core_graphs.size())) {
+				out += Mv::to(y + 1 + i, graph_x) + Theme::c("inactive_fg") + graph_bg * core_graph_width
+					+ Mv::to(y + 1 + i, graph_x) + core_color + core_graphs.at(i)(safeVal(npu.core_percent, i), redraw_all);
+			}
+			out += Mv::to(y + 1 + i, meter_x) + core_meter(static_cast<int>(core_percent));
+			out += Mv::to(y + 1 + i, percent_x) + core_color + rjust(to_string(core_percent), 4) + Theme::c("main_fg") + '%';
+		}
+
+		//? Clock speed as the statistics box title
+		if (npu.freq > 0) {
+			const auto freq_string = to_string(npu.freq / 1'000'000);
+			out += Mv::to(b_y, b_x + b_width - 12) + Theme::c("div_line") + Symbols::h_line * max(0, 5 - static_cast<int>(freq_string.size()))
+				+ Symbols::title_left + Fx::b + Theme::c("title") + freq_string + " MHz" + Fx::ub + Theme::c("div_line") + Symbols::title_right;
+		}
+
+		//? Utilization averaged over all cores, with the temperature graph beside it
+		int stats_row = 1;
+		out += Mv::to(b_y + stats_row, b_x + 1) + Theme::c("main_fg") + Fx::b + "ALL " + total_meter(static_cast<int>(total))
+			+ Theme::g("cpu").at(clamp(total, 0ll, 100ll)) + rjust(to_string(total), 4) + Theme::c("main_fg") + '%';
+		if (show_temps) {
+			const auto [temp, unit] = celsius_to(npu.temp.back(), temp_scale);
+			out += ' ' + Theme::c("inactive_fg") + graph_bg * 5 + Mv::l(5)
+				+ Theme::g("temp").at(clamp(npu.temp.back() * 100 / npu.temp_max, 0ll, 100ll)) + temp_graph(npu.temp, redraw_all)
+				+ rjust(to_string(temp), 4) + Theme::c("main_fg") + unit;
+		}
+		stats_row++;
+
+		if (npu.volt > 0) {
+			out += Mv::to(b_y + stats_row, b_x + 1) + Theme::c("main_fg") + Fx::b + "VDD "
+				+ Theme::c("title") + fmt::format("{:.3f}", static_cast<double>(npu.volt) / 1'000'000.0)
+				+ Theme::c("main_fg") + 'V' + Fx::ub;
+		}
+
+		//? Keep the averaged utilization history pinned to the last rows inside the statistics box
+		if (graph_height > 0)
+			out += Mv::to(b_y + b_height - 1 - graph_height, b_x + 1) + total_graph(npu.total_percent, redraw_all);
+
+		redraw = false;
+		return out + Fx::reset;
+	}
+}
+#endif // NPU_SUPPORT
+
 namespace Mem {
 	int width_p = 45, height_p = 40;
 	int min_width = 36, min_height = 10;
@@ -2245,6 +2356,18 @@ namespace Proc {
 }
 
 namespace Draw {
+	//* Height taken up by the accelerator boxes stacked between the cpu box and the ones below it
+	static int accelerator_height() {
+		int height = 0;
+	#ifdef GPU_SUPPORT
+		height += Gpu::total_height;
+	#endif
+	#ifdef NPU_SUPPORT
+		height += Npu::total_height;
+	#endif
+		return height;
+	}
+
 	void calcSizes() {
 		atomic_wait(Runner::active);
 		Config::unlock();
@@ -2299,6 +2422,12 @@ namespace Draw {
 			total_height += 4 + gpu_b_height_offsets[shown_panels[i]];
 		}
 	#endif
+	#ifdef NPU_SUPPORT
+		Npu::box.clear();
+		Npu::shown = boxes.contains("npu0") and Npu::count > 0;
+		//? The npu box has a fixed height, so this is the final value and not just an estimate
+		Npu::total_height = (Npu::shown ? Npu::box_height() : 0);
+	#endif
 		Mem::shown = boxes.contains("mem");
 		Net::shown = boxes.contains("net");
 		Proc::shown = boxes.contains("proc");
@@ -2324,6 +2453,10 @@ namespace Draw {
 			if (height <= Term::height-gpus_extra_height) height += gpus_extra_height;
 		#else
 			height = max(8, (int)ceil((double)Term::height * (trim(boxes) == "cpu" ? 100 : height_p) / 100));
+		#endif
+		#ifdef NPU_SUPPORT
+			//? The npu box is stacked below the cpu box, give the space back to it
+			if (Npu::shown) height = max(8, height - Npu::total_height);
 		#endif
 			x = 1;
 			y = cpu_bottom ? Term::height - height + 1 : 1;
@@ -2427,6 +2560,39 @@ namespace Draw {
 		}
 	#endif
 
+	#ifdef NPU_SUPPORT
+		//* Calculate and draw npu box outlines
+		if (Npu::shown) {
+			using namespace Npu;
+			width = Term::width;
+			height = box_height();
+			x = 1;
+			//? Stacked directly below the gpu boxes, which are the only thing above it
+			int stack_top = 0;
+		#ifdef GPU_SUPPORT
+			stack_top = Gpu::total_height;
+		#endif
+			y = 1 + stack_top + (not Config::getB("cpu_bottom")) * Cpu::shown * Cpu::height;
+			total_height = height;
+			redraw = true;
+
+			b_width = clamp(width / 2, stats_min_width, 65);
+			b_height = height - 2;
+			b_x = x + width - b_width - 1;
+			b_y = y + 1;
+
+			//? Room between the borders and the statistics box for the label, graph, meter and percentage.
+			//? The percentage is five wide and must stop one column short of the border it abuts.
+			const int label_width = (Npu::count > 9 ? 6 : 5);
+			core_meter_width = min(12, max(4, (b_x - x) / 5));
+			core_graph_width = max(0, b_x - x - 1 - label_width - core_meter_width - 7);
+
+			const int num = key_digit();
+			box = createBox(x, y, width, height, Theme::c("cpu_box"), true, "npu0", "", num < 0 ? 0 : num);
+			box += createBox(b_x, b_y, b_width, b_height, "", false, name.substr(0, b_width - 5));
+		}
+	#endif
+
 		//* Calculate and draw mem box outlines
 		if (Mem::shown) {
 			using namespace Mem;
@@ -2436,21 +2602,15 @@ namespace Draw {
 
 			width = round((double)Term::width * (Proc::shown ? width_p : 100) / 100);
 		#ifdef GPU_SUPPORT
-			height = floor(static_cast<double>(Term::height) * (100 - Net::height_p * Net::shown*4 / ((Gpu::shown != 0 and Cpu::shown) + 4)) / 100) - Cpu::height - Gpu::total_height;
+			height = floor(static_cast<double>(Term::height) * (100 - Net::height_p * Net::shown*4 / ((Gpu::shown != 0 and Cpu::shown) + 4)) / 100) - Cpu::height - accelerator_height();
 		#else
-			height = floor(static_cast<double>(Term::height) * (100 - Cpu::height_p * Cpu::shown - Net::height_p * Net::shown) / 100);
+			height = floor(static_cast<double>(Term::height) * (100 - Cpu::height_p * Cpu::shown - Net::height_p * Net::shown) / 100) - accelerator_height();
 		#endif
 			x = (proc_left and Proc::shown) ? Term::width - width + 1: 1;
 			if (mem_below_net and Net::shown)
-		#ifdef GPU_SUPPORT
 				y = Term::height - height + 1 - (cpu_bottom ? Cpu::height : 0);
 			else
-				y = (cpu_bottom ? 1 : Cpu::height + 1) + Gpu::total_height;
-		#else
-				y = Term::height - height + 1 - (cpu_bottom ? Cpu::height : 0);
-			else
-				y = cpu_bottom ? 1 : Cpu::height + 1;
-		#endif
+				y = (cpu_bottom ? 1 : Cpu::height + 1) + accelerator_height();
 
 			if (show_disks) {
 				mem_width = ceil((double)(width - 3) / 2);
@@ -2499,18 +2659,10 @@ namespace Draw {
 		if (Net::shown) {
 			using namespace Net;
 			width = round((double)Term::width * (Proc::shown ? width_p : 100) / 100);
-		#ifdef GPU_SUPPORT
-			height = Term::height - Cpu::height - Gpu::total_height - Mem::height;
-		#else
-			height = Term::height - Cpu::height - Mem::height;
-		#endif
+			height = Term::height - Cpu::height - accelerator_height() - Mem::height;
 			x = (proc_left and Proc::shown) ? Term::width - width + 1 : 1;
 			if (mem_below_net and Mem::shown)
-			#ifdef GPU_SUPPORT
-				y = (cpu_bottom ? 1 : Cpu::height + 1) + Gpu::total_height;
-			#else
-				y = cpu_bottom ? 1 : Cpu::height + 1;
-			#endif
+				y = (cpu_bottom ? 1 : Cpu::height + 1) + accelerator_height();
 			else
 				y = Term::height - height + 1 - (cpu_bottom ? Cpu::height : 0);
 
@@ -2533,17 +2685,9 @@ namespace Draw {
 		if (Proc::shown) {
 			using namespace Proc;
 			width = Term::width - (Mem::shown ? Mem::width : (Net::shown ? Net::width : 0));
-		#ifdef GPU_SUPPORT
-			height = Term::height - Cpu::height - Gpu::total_height;
-		#else
-			height = Term::height - Cpu::height;
-		#endif
+			height = Term::height - Cpu::height - accelerator_height();
 			x = proc_left ? 1 : Term::width - width + 1;
-		#ifdef GPU_SUPPORT
-			y = ((cpu_bottom and Cpu::shown) ? 1 : Cpu::height + 1) + Gpu::total_height;
-		#else
-			y = (cpu_bottom and Cpu::shown) ? 1 : Cpu::height + 1;
-		#endif
+			y = ((cpu_bottom and Cpu::shown) ? 1 : Cpu::height + 1) + accelerator_height();
 			select_max = height - 3;
 			box = createBox(x, y, width, height, Theme::c("proc_box"), true, "proc", "", 4);
 		}

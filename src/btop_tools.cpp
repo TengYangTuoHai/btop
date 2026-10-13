@@ -135,6 +135,10 @@ namespace Term {
 	#ifdef GPU_SUPPORT
 		if (gpu != 0 and width < Gpu::min_width) width = Gpu::min_width;
 	#endif
+	#ifdef NPU_SUPPORT
+		const bool npu = Npu::count > 0 and boxes.contains("npu0");
+		if (npu and width < Npu::min_width) width = Npu::min_width;
+	#endif
 
 		int height = (cpu ? Cpu::min_height : 0);
 		if (proc) height += Proc::min_height;
@@ -142,6 +146,9 @@ namespace Term {
 	#ifdef GPU_SUPPORT
 		for (int i = 0; i < gpu; i++)
 			height += Gpu::gpu_b_height_offsets[i] + 4;
+	#endif
+	#ifdef NPU_SUPPORT
+		if (npu) height += Npu::box_height();
 	#endif
 
 		return { width, height };

@@ -30,6 +30,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(BTOP_STATIC "Link btop statically" OFF)
 option(BTOP_GPU "Enable GPU support" ON)
+option(BTOP_NPU "Enable NPU support (Linux, currently Rockchip)" ON)
 cmake_dependent_option(BTOP_RSMI_STATIC "Link statically to ROCm SMI" OFF "BTOP_GPU" OFF)
 
 # Enable LTO in release builds by default
@@ -90,7 +91,7 @@ execute_process(
   OUTPUT_VARIABLE GIT_COMMIT
   OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
 set(CONFIGURE_COMMAND
-    "cmake -DBTOP_STATIC=${BTOP_STATIC} -DBTOP_GPU=${BTOP_GPU}"
+    "cmake -DBTOP_STATIC=${BTOP_STATIC} -DBTOP_GPU=${BTOP_GPU} -DBTOP_NPU=${BTOP_NPU}"
 )
 get_filename_component(CXX_COMPILER_BASENAME "${CMAKE_CXX_COMPILER}" NAME)
 set(COMPILER "${CXX_COMPILER_BASENAME}")
@@ -191,6 +192,11 @@ if(LINUX AND BTOP_GPU)
   if(NOT BTOP_STATIC)
     target_link_libraries(libbtop ${CMAKE_DL_LIBS})
   endif()
+endif()
+
+# Enable NPU support
+if(LINUX AND BTOP_NPU)
+  target_compile_definitions(libbtop PUBLIC NPU_SUPPORT)
 endif()
 
 if(BTOP_STATIC)

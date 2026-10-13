@@ -185,12 +185,18 @@ void term_resize(bool force) {
 					clean_quit(0);
 				else if (key.size() == 1 and isint(key)) {
 					auto intKey = stoi(key);
+					string box;
+					if (intKey > 0 and intKey < 5)
+						box = all_boxes.at(intKey);
 				#ifdef GPU_SUPPORT
-					if ((intKey == 0 and Gpu::count >= 5) or (intKey >= 5 and intKey - 4 <= Gpu::count)) {
-				#else
-					if (intKey > 0 and intKey < 5) {
+					else if ((intKey == 0 and Gpu::count >= 5) or (intKey >= 5 and intKey - 4 <= Gpu::count))
+						box = all_boxes.at(intKey);
 				#endif
-						const auto& box = all_boxes.at(intKey);
+				#ifdef NPU_SUPPORT
+					else if (Npu::count > 0 and intKey == Npu::key_digit())
+						box = "npu0";
+				#endif
+					if (not box.empty()) {
 						Config::current_preset.reset();
 						Config::toggle_box(box);
 						boxes = Config::getS("shown_boxes");
@@ -489,14 +495,17 @@ namespace Runner {
 
 			//! DEBUG stats
 			if (Global::debug) {
+				//? One row per timed box plus the header and the borders
+				constexpr int debug_rows = 8
+				#ifdef GPU_SUPPORT
+					+ 1
+				#endif
+				#ifdef NPU_SUPPORT
+					+ 1
+				#endif
+				;
                 if (debug_bg.empty() or redraw)
-                    Runner::debug_bg = Draw::createBox(2, 2, 33,
-					#ifdef GPU_SUPPORT
-						9,
-					#else
-						8,
-					#endif
-					"", true, "μs");
+                    Runner::debug_bg = Draw::createBox(2, 2, 33, debug_rows, "", true, "μs");
 
 				debug_times.clear();
 				debug_times["total"] = {0, 0};
@@ -583,6 +592,27 @@ namespace Runner {
 					}
 				}
 			#endif
+			#ifdef NPU_SUPPORT
+				//? NPU
+				if (Npu::shown) {
+					try {
+						if (Global::debug) debug_timer("npu", collect_begin);
+
+						//? Start collect
+						auto& npu = Npu::collect(conf.no_update);
+
+						if (Global::debug) debug_timer("npu", draw_begin);
+
+						//? Draw box
+						if (not pause_output) output += Npu::draw(npu, conf.force_redraw, conf.no_update);
+
+						if (Global::debug) debug_timer("npu", draw_done);
+					}
+					catch (const std::exception& e) {
+						throw std::runtime_error("Npu:: -> " + string{e.what()});
+					}
+				}
+			#endif
 				//? MEM
 				if (v_contains(conf.boxes, "mem")) {
 					try {
@@ -665,6 +695,23 @@ namespace Runner {
 			if (output.empty() and not pause_output) {
 				if (empty_bg.empty()) {
 					const int x = Term::width / 2 - 10, y = Term::height / 2 - 10;
+				#ifdef NPU_SUPPORT
+					const int npu_key = (Npu::count > 0 ? Npu::key_digit() : -1);
+				#else
+					const int npu_key = -1;
+				#endif
+					//? The gpu and npu hints take the rows below the fixed box hints, in that order
+					int hint_row = 12;
+				#ifdef GPU_SUPPORT
+					const string gpu_hint = fmt::format("{}{}{}{}| Show GPU boxes",
+						Mv::to(y+hint_row, x-2), Theme::c("hi_fg"), "5-0 ", Theme::c("main_fg"));
+					hint_row++;
+				#else
+					const string gpu_hint;
+				#endif
+					const string npu_hint = (npu_key < 0 ? "" : fmt::format("{}{}{} {}| Show NPU box",
+						Mv::to(y+hint_row, x-2), Theme::c("hi_fg"), npu_key, Theme::c("main_fg")));
+					if (npu_key >= 0) hint_row++;
 					output += Term::clear;
 					empty_bg = fmt::format(
 						"{banner}"
@@ -673,7 +720,8 @@ namespace Runner {
 						"{mv3}{hiFg}2 {mainFg}| Show MEM box"
 						"{mv4}{hiFg}3 {mainFg}| Show NET box"
 						"{mv5}{hiFg}4 {mainFg}| Show PROC box"
-						"{mv6}{hiFg}5-0 {mainFg}| Show GPU boxes"
+						"{gpuHint}"
+						"{npuHint}"
 						"{mv7}{hiFg}esc {mainFg}| Show menu"
 						"{mv8}{hiFg}q {mainFg}| Quit",
 						"banner"_a = Draw::banner_gen(y, 0, true),
@@ -683,9 +731,10 @@ namespace Runner {
 						"mv3"_a = Mv::to(y+9, x),
 						"mv4"_a = Mv::to(y+10, x),
 						"mv5"_a = Mv::to(y+11, x),
-						"mv6"_a = Mv::to(y+12, x-2),
-						"mv7"_a = Mv::to(y+13, x-2),
-						"mv8"_a = Mv::to(y+14, x)
+						"gpuHint"_a = gpu_hint,
+						"npuHint"_a = npu_hint,
+						"mv7"_a = Mv::to(y+hint_row, x-2),
+						"mv8"_a = Mv::to(y+hint_row+1, x)
 					);
 				}
 				output += empty_bg;
@@ -699,11 +748,15 @@ namespace Runner {
 					"post"_a = Theme::c("main_fg") + Fx::ub
 				);
 				static auto loc = std::locale(std::locale::classic(), new MyNumPunct);
+				vector<string> debug_names = {"cpu", "mem", "net", "proc"};
 			#ifdef GPU_SUPPORT
-				for (const string name : {"cpu", "mem", "net", "proc", "gpu", "total"}) {
-			#else
-				for (const string name : {"cpu", "mem", "net", "proc", "total"}) {
+				debug_names.push_back("gpu");
 			#endif
+			#ifdef NPU_SUPPORT
+				debug_names.push_back("npu");
+			#endif
+				debug_names.push_back("total");
+				for (const auto& name : debug_names) {
 					if (not debug_times.contains(name)) debug_times[name] = {0,0};
 					const auto& [time_collect, time_draw] = debug_times.at(name);
 					if (name == "total") output += Fx::b;

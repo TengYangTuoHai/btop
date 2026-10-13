@@ -113,6 +113,18 @@ ifeq ($(GPU_SUPPORT),true)
 	endif
 endif
 
+#? NPU Support (Linux only, currently Rockchip)
+ifeq ($(PLATFORM_LC),linux)
+	NPU_SUPPORT ?= true
+endif
+ifneq ($(NPU_SUPPORT),true)
+	NPU_SUPPORT := false
+endif
+
+ifeq ($(NPU_SUPPORT),true)
+	override ADDFLAGS += -DNPU_SUPPORT
+endif
+
 #? Compiler and Linker
 ifeq ($(shell $(CXX) --version | grep clang >/dev/null 2>&1; echo $$?),0)
 	override CXX_IS_CLANG := true
@@ -216,7 +228,7 @@ endif
 GIT_COMMIT := $(shell git rev-parse --short HEAD 2> /dev/null || true)
 CONFIGURE_COMMAND := $(MAKE) STATIC=$(STATIC)
 ifeq ($(PLATFORM_LC),linux)
-	CONFIGURE_COMMAND +=  GPU_SUPPORT=$(GPU_SUPPORT) RSMI_STATIC=$(RSMI_STATIC)
+	CONFIGURE_COMMAND +=  GPU_SUPPORT=$(GPU_SUPPORT) NPU_SUPPORT=$(NPU_SUPPORT) RSMI_STATIC=$(RSMI_STATIC)
 endif
 
 #? The Directories, Source, Includes, Objects and Binary
@@ -293,6 +305,7 @@ info:
 	@$(call green  ,PLATFORM     $(YELLOW)?| ,$(PLATFORM))
 	@$(call cyan   ,ARCH         $(YELLOW)?| ,$(ARCH))
 	@$(call magenta,GPU_SUPPORT  $(BLUE):| ,$(GPU_SUPPORT))
+	@$(call magenta,NPU_SUPPORT  $(BLUE):| ,$(NPU_SUPPORT))
 	@$(call yellow ,CXX          ?| ,$(CXX) $(B_YELLOW)($(WHITE)$(CXX_VERSION)$(YELLOW)))
 	@$(SHOW_CC_INFO) || \
 	 $(call yellow ,CC           ?| ,$(CC) $(B_YELLOW)($(WHITE)$(CC_VERSION)$(YELLOW)))

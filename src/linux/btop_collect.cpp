@@ -18,6 +18,7 @@ tab-size = 4
 
 #include <algorithm>
 #include <charconv>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
@@ -421,6 +422,12 @@ namespace Shared {
 					   + (gpus[i].supported_functions.mem_total or gpus[i].supported_functions.mem_used)
 						* (1 + 2*(gpus[i].supported_functions.mem_total and gpus[i].supported_functions.mem_used) + 2*gpus[i].supported_functions.mem_utilization);
 		}
+	#endif
+
+		//? Init for namespace Npu
+	#ifdef NPU_SUPPORT
+		if (Config::getS("shown_npus").contains("rockchip"))
+			Npu::init();
 	#endif
 
 		//? Init for namespace Mem
@@ -3641,3 +3648,149 @@ namespace Tools {
         throw std::runtime_error(fmt::format("Failed to get uptime from {}", Shared::procPath / "uptime"));
 	}
 }
+
+#ifdef NPU_SUPPORT
+
+namespace Npu {
+	npu_info current_npu;
+	string name;
+	int count = 0;
+
+	//? Rockchip is currently the only supported NPU. The driver publishes per-core utilization,
+	//? clock and voltage through debugfs, which needs root to read. Without it there is no way
+	//? to tell the cores apart, so the box stays hidden rather than showing a bare clock.
+	const fs::path rknpu_debugfs_dir = "/sys/kernel/debug/rknpu";
+	fs::path npu_devfreq_dir;
+	fs::path npu_thermal_file;
+
+	//* Read and trim the first line of <path>, empty when the file is missing or unreadable
+	string read_npu_value(const fs::path& path) {
+		if (path.empty()) return "";
+		try {
+			ifstream pread(path);
+			if (not pread.good()) return "";
+			string value;
+			getline(pread, value);
+			return string{trim(value)};
+		}
+		catch (const std::exception&) {
+			return "";
+		}
+	}
+
+	//* Read a single non-negative number, 0 when unavailable
+	long long read_npu_number(const fs::path& path) {
+		const auto value = read_npu_value(path);
+		if (value.empty() or not isint(value)) return 0;
+		try {
+			return stoll(value);
+		}
+		catch (const std::exception&) {
+			return 0;
+		}
+	}
+
+	//* Locate the devfreq and thermal nodes belonging to the NPU, keyed on their names
+	void find_npu_nodes() {
+		std::error_code ec;
+		for (const auto& entry : fs::directory_iterator("/sys/class/devfreq", ec)) {
+			if (entry.path().filename().string().ends_with(".npu")) {
+				npu_devfreq_dir = entry.path();
+				break;
+			}
+		}
+		ec.clear();
+		for (const auto& entry : fs::directory_iterator("/sys/class/thermal", ec)) {
+			if (read_npu_value(entry.path() / "type") == "npu-thermal") {
+				npu_thermal_file = entry.path() / "temp";
+				break;
+			}
+		}
+	}
+
+	//* Parse "NPU load:  Core0: 74%, Core1:  0%, Core2:  0%," into one value per core
+	vector<long long> parse_rknpu_load(const string& raw) {
+		vector<long long> loads;
+		size_t pos = 0;
+		while ((pos = raw.find("Core", pos)) != string::npos) {
+			pos += 4;
+			size_t core_end = pos;
+			while (core_end < raw.size() and std::isdigit(static_cast<unsigned char>(raw.at(core_end)))) core_end++;
+			if (core_end == pos) continue; // "Core" not followed by an index
+			const auto core_index = std::stoull(raw.substr(pos, core_end - pos));
+			const auto colon = raw.find(':', core_end);
+			if (colon == string::npos) break;
+			const auto number_start = raw.find_first_of("0123456789", colon);
+			if (number_start == string::npos) break;
+			size_t number_end = number_start;
+			while (number_end < raw.size() and std::isdigit(static_cast<unsigned char>(raw.at(number_end)))) number_end++;
+			if (core_index >= loads.size()) loads.resize(core_index + 1, 0ll);
+			loads.at(core_index) = clamp(stoll(raw.substr(number_start, number_end - number_start)), 0ll, 100ll);
+			pos = number_end;
+		}
+		return loads;
+	}
+
+	//* Probe for a usable NPU, returns false when there is nothing to show
+	bool init() {
+		find_npu_nodes();
+
+		//? Per-core utilization is only reachable through the debugfs interface,
+		//? without read access there is nothing worth showing
+		const auto loads = parse_rknpu_load(read_npu_value(rknpu_debugfs_dir / "load"));
+		if (loads.empty()) return false;
+
+		//? Seed every history with a zero so the draw code always has a back() to read
+		current_npu.core_percent.assign(loads.size(), {0ll});
+		current_npu.total_percent.assign(1, 0ll);
+		name = "Rockchip NPU";
+		count = static_cast<int>(loads.size());
+
+		current_npu.got_temp = not npu_thermal_file.empty() and not read_npu_value(npu_thermal_file).empty();
+		return true;
+	}
+
+	//* Collect NPU stats
+	auto collect(bool no_update) -> npu_info& {
+		auto& npu = current_npu;
+		const int width = Term::width;
+
+		if (Runner::stopping or (no_update and not npu.total_percent.empty())) return npu;
+
+		auto loads = parse_rknpu_load(read_npu_value(rknpu_debugfs_dir / "load"));
+		if (loads.empty()) loads.assign(npu.core_percent.size(), 0ll);
+		if (loads.size() != npu.core_percent.size()) {
+			npu.core_percent.resize(loads.size());
+			count = static_cast<int>(loads.size());
+		}
+
+		//? Clock and voltage live in debugfs, the devfreq node covers the clock unprivileged
+		npu.freq = read_npu_number(rknpu_debugfs_dir / "freq");
+		if (npu.freq == 0) npu.freq = read_npu_number(npu_devfreq_dir / "cur_freq");
+		npu.volt = read_npu_number(rknpu_debugfs_dir / "volt");
+
+		if (npu.got_temp) {
+			const auto temp = read_npu_number(npu_thermal_file);
+			if (temp > 0) npu.temp.push_back(temp / 1000); //? millidegrees → degrees
+		}
+
+		//* Average utilization across the cores, treating the NPU as a single device
+		long long total = 0;
+		for (size_t i = 0; i < loads.size(); i++) {
+			total += loads.at(i);
+			npu.core_percent.at(i).push_back(loads.at(i));
+			while (cmp_greater(npu.core_percent.at(i).size(), width * 2)) npu.core_percent.at(i).pop_front();
+		}
+		if (not loads.empty()) total /= static_cast<long long>(loads.size());
+		npu.total_percent.push_back(total);
+
+		if (width != 0) {
+			while (cmp_greater(npu.total_percent.size(), width * 2)) npu.total_percent.pop_front();
+			while (cmp_greater(npu.temp.size(), 18)) npu.temp.pop_front();
+		}
+
+		return npu;
+	}
+}
+
+#endif // NPU_SUPPORT

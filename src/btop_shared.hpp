@@ -205,6 +205,44 @@ namespace Gpu {
 
 #endif // GPU_SUPPORT
 
+#ifdef NPU_SUPPORT
+
+namespace Npu {
+	extern string box, name;
+	extern int x, y, width, height, min_width, min_height;
+	extern int total_height;
+	extern bool shown, redraw;
+	extern int count; // number of cores on the NPU
+
+	//* Container for NPU info
+	struct npu_info {
+		vector<deque<long long>> core_percent;   // utilization history per core
+		deque<long long> total_percent = {0};    // averaged utilization history
+		long long freq = 0;      // Hz
+		long long volt = 0;      // µV
+		deque<long long> temp = {0}; // degrees Celsius
+		long long temp_max = 100;
+		bool got_temp = false;
+	};
+
+	//* Find the NPU nodes, returns false when no NPU is present
+	bool init();
+
+	//* Collect NPU stats
+	auto collect(bool no_update = false) -> npu_info&;
+
+	//* Draw contents of npu box using <npu> as source
+	string draw(const npu_info& npu, bool force_redraw = false, bool data_same = false);
+
+	//* Digit key that toggles the npu box, -1 when the gpu boxes already use every free digit
+	int key_digit();
+
+	//* Rows the npu box needs for the current number of cores
+	int box_height();
+}
+
+#endif // NPU_SUPPORT
+
 namespace Cpu {
 	extern string box;
 	extern int x, y, width, height, min_width, min_height;

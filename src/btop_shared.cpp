@@ -93,6 +93,21 @@ namespace Gpu {
 }
 #endif
 
+#ifdef NPU_SUPPORT
+namespace Npu {
+	//* Digits 5 through 9 toggle gpu0 through gpu4, the npu takes the first digit left over
+	int key_digit() {
+		int index = 0;
+	#ifdef GPU_SUPPORT
+		index = Gpu::count;
+		//? The "0" key is the sixth gpu slot, so the npu never claims it
+		if (index >= 5) return -1;
+	#endif
+		return 5 + index;
+	}
+}
+#endif
+
 namespace Proc {
 bool set_priority(pid_t pid, int priority) {
   if (setpriority(PRIO_PROCESS, pid, priority) == 0) {
