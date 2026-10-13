@@ -116,9 +116,12 @@ endif
 #? NPU Support (Linux only, currently Rockchip)
 ifeq ($(PLATFORM_LC),linux)
 	NPU_SUPPORT ?= true
-endif
-ifneq ($(NPU_SUPPORT),true)
-	NPU_SUPPORT := false
+	ifneq ($(NPU_SUPPORT),true)
+		NPU_SUPPORT := false
+	endif
+else
+	#? Only the Linux collector has an npu, ignore a request to turn it on elsewhere
+	override NPU_SUPPORT := false
 endif
 
 ifeq ($(NPU_SUPPORT),true)

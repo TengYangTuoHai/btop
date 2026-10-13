@@ -1656,7 +1656,8 @@ static int optionsMenu(const string& key) {
 			int cat_text_width = 0;
 			for (const auto& m : cat_names) cat_text_width += (int)m.size() + 2;
 			const int cat_pad = max(2, (80 - cat_text_width) / (int)cat_names.size());
-			const int option_menu_tab_width = cat_text_width / (int)cat_names.size() + cat_pad;
+			//? A button is as wide as its own label, so track where each one really starts
+			int cat_col = x + 4;
 			for (size_t i = 0; i < cat_names.size(); i++) {
 				const auto& m = cat_names[i];
 				out += Fx::b + ((int)i == selected_cat
@@ -1664,14 +1665,16 @@ static int optionsMenu(const string& key) {
 						: Theme::c("hi_fg") + to_string(i + 1) + Theme::c("title") + m + ' ')
 					+ Mv::r(cat_pad);
 
+				const int cat_width = (int)m.size() + 2 + cat_pad;
 				if (const auto button_name = fmt::format("select_cat_{}", i + 1); not editing and not mouse_mappings.contains(button_name)) {
 					mouse_mappings[button_name] = {
 						.line = y + 6,
-						.col = x + 2 + (option_menu_tab_width * (int)i),
+						.col = cat_col,
 						.height = 3,
-						.width = option_menu_tab_width,
+						.width = cat_width,
 					};
 				}
+				cat_col += cat_width;
 			}
 			if (pages > 1) {
 				out += Mv::to(y+6 + height - 1, x+2) + Theme::c("hi_fg") + Symbols::title_left_down + Fx::b + Symbols::up + Theme::c("title") + " page "

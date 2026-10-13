@@ -2455,8 +2455,13 @@ namespace Draw {
 			height = max(8, (int)ceil((double)Term::height * (trim(boxes) == "cpu" ? 100 : height_p) / 100));
 		#endif
 		#ifdef NPU_SUPPORT
-			//? The npu box is stacked below the cpu box, give the space back to it
-			if (Npu::shown) height = max(8, height - Npu::total_height);
+			//? The npu box is stacked below the cpu box, so it takes its rows from it
+			if (Npu::shown) {
+				height = max(8, height - Npu::total_height);
+				//? With nothing below it, the cpu box also gets the rows the accelerator boxes leave over
+				if (not (Mem::shown or Net::shown or Proc::shown))
+					height = max(8, Term::height - accelerator_height());
+			}
 		#endif
 			x = 1;
 			y = cpu_bottom ? Term::height - height + 1 : 1;
@@ -2525,6 +2530,12 @@ namespace Draw {
 			enc_meter_vec.resize(shown);
 			redraw.resize(shown);
 			total_height = 0;
+			//? Rows the npu box below claims, 0 when it is not shown or not supported
+		#ifdef NPU_SUPPORT
+			const int npu_rows = Npu::total_height;
+		#else
+			constexpr int npu_rows = 0;
+		#endif
 			for (auto i = 0; i < shown; ++i) {
 				redraw[i] = true;
 				int height = 0;
@@ -2535,7 +2546,7 @@ namespace Draw {
 					else height = Cpu::height;
 				else
 					if (not (Mem::shown or Net::shown or Proc::shown))
-						height = (Term::height - total_height) / (Gpu::shown - i) + (i == 0) * ((Term::height - total_height) % (Gpu::shown - i));
+						height = (Term::height - total_height - npu_rows) / (Gpu::shown - i) + (i == 0) * ((Term::height - total_height - npu_rows) % (Gpu::shown - i));
 					else
 						height = max(min_height, (int)ceil((double)Term::height * height_p/Gpu::shown / 100));
 
@@ -2566,6 +2577,8 @@ namespace Draw {
 			using namespace Npu;
 			width = Term::width;
 			height = box_height();
+			//? With nothing else on screen there is no other box left to fill the terminal
+			if (trim(boxes) == "npu0") height = max(height, (int)Term::height);
 			x = 1;
 			//? Stacked directly below the gpu boxes, which are the only thing above it
 			int stack_top = 0;

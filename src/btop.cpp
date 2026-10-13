@@ -594,7 +594,7 @@ namespace Runner {
 			#endif
 			#ifdef NPU_SUPPORT
 				//? NPU
-				if (Npu::shown) {
+				if (Npu::shown and v_contains(conf.boxes, "npu0")) {
 					try {
 						if (Global::debug) debug_timer("npu", collect_begin);
 
