@@ -17,7 +17,9 @@ tab-size = 4
 */
 
 #include <algorithm>
+#include <cerrno>
 #include <charconv>
+#include <chrono>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
@@ -35,10 +37,15 @@ tab-size = 4
 
 #include <arpa/inet.h> // for inet_ntop()
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <netdb.h>
+#include <poll.h>
+#include <signal.h>
+#include <spawn.h>
 #include <sys/statvfs.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <fmt/format.h>
@@ -3653,8 +3660,9 @@ namespace Tools {
 
 namespace Npu {
 	npu_info current_npu;
-	string name;
+	string name, card_name;
 	int count = 0;
+	bool has_card = false;
 
 	//? Rockchip is currently the only supported NPU. The driver publishes per-core utilization,
 	//? clock and voltage through debugfs, which needs root to read. Without it there is no way
@@ -3662,6 +3670,16 @@ namespace Npu {
 	const fs::path rknpu_debugfs_dir = "/sys/kernel/debug/rknpu";
 	fs::path npu_devfreq_dir;
 	fs::path npu_thermal_file;
+
+	//? Accelerator cards such as the RK1820 are plain PCIe endpoints: their kernel driver moves
+	//? buffers and nothing else, so the utilization only exists inside the vendor runtime, which
+	//? publishes it through the rknn-smi CLI. A subprocess per sample is the only way to read it.
+	fs::path rknn_smi_path;
+
+	//? The first query after boot waits for the runtime to bring the card up, which takes far longer
+	//? than a sample of an already running card, so the probe that decides the box layout is generous
+	constexpr int card_probe_timeout_ms = 3000;
+	constexpr int card_sample_timeout_ms = 1000;
 
 	//* Read and trim the first line of <path>, empty when the file is missing or unreadable
 	string read_npu_value(const fs::path& path) {
@@ -3746,20 +3764,170 @@ namespace Npu {
 		return loads;
 	}
 
+	//* Locate the vendor CLI, which is neither installed everywhere nor guaranteed to sit on PATH
+	fs::path find_rknn_smi() {
+		for (const auto* candidate : {"/usr/bin/rknn-smi", "/bin/rknn-smi", "/usr/local/bin/rknn-smi"}) {
+			if (access(candidate, X_OK) == 0) return fs::path{candidate};
+		}
+		if (const auto* path_env = std::getenv("PATH"); path_env != nullptr) {
+			for (const auto& dir : ssplit(path_env, ':')) {
+				const auto candidate = fs::path{dir} / "rknn-smi";
+				if (access(candidate.c_str(), X_OK) == 0) return candidate;
+			}
+		}
+		return {};
+	}
+
+	//* Run <exe> with <args> and return its stdout, empty when it fails or outlives <timeout_ms>
+	//? The CLI blocks while it probes the card, so the output is polled against a deadline and the
+	//? child is killed once it expires: a wedged card must not stall the collect thread.
+	string run_npu_command(const string& exe, const vector<string>& args, const int timeout_ms) {
+		int fds[2];
+		if (pipe(fds) != 0) return "";
+
+		posix_spawn_file_actions_t actions;
+		posix_spawn_file_actions_init(&actions);
+		posix_spawn_file_actions_adddup2(&actions, fds[1], STDOUT_FILENO);
+		//? The CLI complains about missing firmware and missing devices, none of which belongs in the TUI
+		posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
+		posix_spawn_file_actions_addclose(&actions, fds[0]);
+		posix_spawn_file_actions_addclose(&actions, fds[1]);
+
+		auto argv_storage = vector<string>{exe};
+		argv_storage.insert(argv_storage.end(), args.begin(), args.end());
+		auto argv = vector<char*>{};
+		argv.reserve(argv_storage.size() + 1);
+		for (auto& arg : argv_storage) argv.push_back(arg.data());
+		argv.push_back(nullptr);
+
+		pid_t pid = -1;
+		const int spawn_status = posix_spawn(&pid, exe.c_str(), &actions, nullptr, argv.data(), environ);
+		posix_spawn_file_actions_destroy(&actions);
+		close(fds[1]);
+		if (spawn_status != 0) {
+			close(fds[0]);
+			return "";
+		}
+
+		string output;
+		bool timed_out = false;
+		bool abandoned = false; //? Either the deadline passed or the child produced more than a table
+		const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+		while (true) {
+			const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+			if (remaining <= 0) {
+				timed_out = true;
+				abandoned = true;
+				break;
+			}
+			pollfd entry { .fd = fds[0], .events = POLLIN, .revents = 0 };
+			const int ready = poll(&entry, 1, static_cast<int>(remaining));
+			if (ready == 0) {
+				timed_out = true;
+				abandoned = true;
+				break;
+			}
+			if (ready < 0) {
+				if (errno == EINTR) continue;
+				break;
+			}
+
+			char buffer[4096];
+			const auto bytes = read(fds[0], buffer, sizeof(buffer));
+			if (bytes == 0) break; //? End of output
+			if (bytes < 0) {
+				if (errno == EINTR) continue;
+				break;
+			}
+			output.append(buffer, static_cast<size_t>(bytes));
+			if (output.size() >= 64 * 1024) { //? A table any larger is not rknn-smi output
+				abandoned = true;
+				break;
+			}
+		}
+		close(fds[0]);
+
+		//? A child left behind mid-write could block on the pipe forever, killing it releases the pipe
+		if (abandoned) kill(pid, SIGKILL);
+		while (waitpid(pid, nullptr, 0) < 0 and errno == EINTR) {}
+		return timed_out ? "" : output;
+	}
+
+	//* Utilization of an accelerator card as the vendor CLI reports it
+	struct card_sample {
+		bool present = false; //? At least one card answered
+		string name;
+		bool got_util = false;
+		long long util = 0;
+	};
+
+	//* Parse the `rknn-smi info` table
+	//? A card takes two lines, described by the two header lines above them. The first holds the
+	//? health and the utilization, the second the chip name, bus id, temperature and memory use:
+	//?   | Device                | Health        | Power(mW)     | Npu(%)               |
+	//?   | Chip          Name    | Bus-Id        | Temp(C)       | Memory-Usage(MB)     |
+	//?   ...
+	//?   | 0                     | OK            | NA            | 0                    |
+	//?   | 0             RK1820  | 0004:41:00.0  | 39            | 31   / 2560          |
+	card_sample parse_rknn_smi_info(const string& raw) {
+		card_sample sample;
+		for (const auto& line : ssplit(raw, '\n')) {
+			const auto cells = ssplit(line, '|');
+			if (cells.size() < 4) continue;
+
+			const auto first = string{trim(cells.at(0))};
+			const auto second = string{trim(cells.at(1))};
+			const auto fourth = string{trim(cells.at(3))};
+
+			//? The chip line is the one carrying the PCIe bus id, and with it the model name
+			if (second.find(':') != string::npos) {
+				const auto tokens = ssplit(first);
+				if (not tokens.empty()) sample.name = tokens.back();
+				sample.present = true;
+				continue;
+			}
+
+			//? The device line is the one starting with the index, the header lines start with text
+			if (first.empty() or not std::isdigit(static_cast<unsigned char>(first.front()))) continue;
+			if (isint(fourth)) {
+				sample.util = clamp(std::stoll(fourth), 0ll, 100ll);
+				sample.got_util = true;
+				sample.present = true;
+			}
+		}
+		return sample;
+	}
+
+	//* Sample the accelerator card
+	//? The CLI exits non-zero even when it printed a valid table, so only the output is trusted
+	card_sample query_card(const int timeout_ms = card_sample_timeout_ms) {
+		if (rknn_smi_path.empty()) return {};
+		return parse_rknn_smi_info(run_npu_command(rknn_smi_path.string(), {"info"}, timeout_ms));
+	}
+
 	//* Probe for a usable NPU, returns false when there is nothing to show
 	bool init() {
 		find_npu_nodes();
 
 		//? Per-core utilization is only reachable through the debugfs interface,
-		//? without read access there is nothing worth showing
+		//? without read access there are no SoC cores to show
 		const auto loads = parse_rknpu_load(read_npu_value(rknpu_debugfs_dir / "load"));
-		if (loads.empty()) return false;
+
+		//? The card is reached through the vendor CLI, which talks to the device node the driver creates
+		rknn_smi_path = find_rknn_smi();
+		const auto card = query_card(card_probe_timeout_ms);
+		//? A card the CLI cannot name would only add a blank row, the model is what labels it
+		card_name = card.name;
+		has_card = card.present and not card_name.empty();
+
+		if (loads.empty() and not has_card) return false;
 
 		//? Seed every history with a zero so the draw code always has a back() to read
 		current_npu.core_percent.assign(loads.size(), {0ll});
 		current_npu.total_percent.assign(1, 0ll);
+		if (card.got_util) current_npu.card_percent.assign(1, card.util);
 		name = "Rockchip NPU";
-		count = static_cast<int>(loads.size());
+		count = static_cast<int>(loads.size()) + (has_card ? 1 : 0);
 
 		current_npu.got_temp = not npu_thermal_file.empty() and not read_npu_value(npu_thermal_file).empty();
 		return true;
@@ -3776,7 +3944,7 @@ namespace Npu {
 		if (loads.empty()) loads.assign(npu.core_percent.size(), 0ll);
 		if (loads.size() != npu.core_percent.size()) {
 			npu.core_percent.resize(loads.size());
-			count = static_cast<int>(loads.size());
+			count = static_cast<int>(loads.size()) + (has_card ? 1 : 0);
 		}
 
 		//? Clock and voltage live in debugfs, the devfreq node covers the clock unprivileged
@@ -3789,14 +3957,31 @@ namespace Npu {
 			if (temp > 0) npu.temp.push_back(temp / 1000); //? millidegrees → degrees
 		}
 
-		//* Average utilization across the cores, treating the NPU as a single device
+		//* Average utilization across every row, treating each of them as one device
 		long long total = 0;
+		long long rows = 0;
 		for (size_t i = 0; i < loads.size(); i++) {
 			total += loads.at(i);
+			rows++;
 			npu.core_percent.at(i).push_back(loads.at(i));
 			while (cmp_greater(npu.core_percent.at(i).size(), width * 2)) npu.core_percent.at(i).pop_front();
 		}
-		if (not loads.empty()) total /= static_cast<long long>(loads.size());
+
+		if (has_card) {
+			const auto card = query_card();
+			//? A failed sample leaves the history alone, so the row freezes instead of claiming
+			//? the card dropped to zero while it is the CLI that broke
+			if (card.got_util) {
+				npu.card_percent.push_back(card.util);
+				while (cmp_greater(npu.card_percent.size(), width * 2)) npu.card_percent.pop_front();
+			}
+			if (not npu.card_percent.empty()) {
+				total += npu.card_percent.back();
+				rows++;
+			}
+		}
+
+		if (rows > 0) total /= rows;
 		npu.total_percent.push_back(total);
 
 		if (width != 0) {

@@ -209,10 +209,11 @@ namespace Gpu {
 
 namespace Npu {
 	extern string box, name;
+	extern string card_name; // accelerator card model, empty when none answered
 	extern int x, y, width, height, min_width, min_height;
 	extern int total_height;
-	extern bool shown, redraw;
-	extern int count; // number of cores on the NPU
+	extern bool shown, redraw, has_card;
+	extern int count; // utilization rows in the box, one per SoC core plus one for the card
 
 	//* Container for NPU info
 	struct npu_info {
@@ -223,6 +224,7 @@ namespace Npu {
 		deque<long long> temp = {0}; // degrees Celsius
 		long long temp_max = 100;
 		bool got_temp = false;
+		deque<long long> card_percent = {0}; // utilization history of a PCIe accelerator card
 	};
 
 	//* Find the NPU nodes, returns false when no NPU is present

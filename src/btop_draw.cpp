@@ -1229,12 +1229,24 @@ namespace Npu {
 	int core_graph_width = 0, core_meter_width = 0, graph_height = 0;
 	bool shown = false, redraw = true;
 	string box;
-	vector<Draw::Graph> core_graphs = {};
+	vector<Draw::Graph> row_graphs = {};
 	Draw::Graph total_graph = {}, temp_graph = {};
 	Draw::Meter core_meter = Draw::Meter{10, "cpu"};
 	Draw::Meter total_meter = Draw::Meter{10, "cpu"};
 
-	//* Rows the box needs: one per core plus the borders, the statistics rows and the total graph
+	//* Number of rows the SoC cores take, the accelerator card is not one of them
+	static int soc_core_count() {
+		return max(0, Npu::count - (Npu::has_card ? 1 : 0));
+	}
+
+	//* Width of the label column, wide enough for the numbered cores and the card model
+	static int row_label_width() {
+		int labels = (soc_core_count() > 9 ? 5 : 4); // "NPU10" or "NPU0"
+		if (Npu::has_card) labels = max(labels, static_cast<int>(Npu::card_name.size()));
+		return labels + 1;
+	}
+
+	//* Rows the box needs: one per core, one for the card, plus the borders and the statistics rows
 	int box_height() {
 		if (Npu::count <= 0) return 0;
 		return max(min_height, Npu::count + 6);
@@ -1250,7 +1262,9 @@ namespace Npu {
 		const auto& temp_scale = Config::getS("temp_scale");
 		const bool show_temps = npu.got_temp and Config::getB("check_temp");
 		const bool redraw_all = (data_same or redraw);
+		const bool card = Npu::has_card and not Npu::card_name.empty();
 		const int core_count = static_cast<int>(npu.core_percent.size());
+		const int row_count = core_count + (card ? 1 : 0);
 		const auto total = npu.total_percent.back();
 
 		//? The statistics box spends a row on utilization and one more when the voltage is known,
@@ -1265,11 +1279,13 @@ namespace Npu {
 		if (redraw) {
 			out += box;
 
-			//? One graph per core, meters hold no state so a single one is shared
-			core_graphs.clear();
-			core_graphs.reserve(core_count);
+			//? One graph per row, meters hold no state so a single one is shared
+			row_graphs.clear();
+			row_graphs.reserve(row_count);
 			for (int i = 0; i < core_count; i++)
-				core_graphs.emplace_back(core_graph_width, 1, "cpu", safeVal(npu.core_percent, i), graph_symbol, false, false);
+				row_graphs.emplace_back(core_graph_width, 1, "cpu", safeVal(npu.core_percent, i), graph_symbol, false, false);
+			if (card)
+				row_graphs.emplace_back(core_graph_width, 1, "cpu", npu.card_percent, graph_symbol, false, false);
 
 			core_meter = Draw::Meter{core_meter_width, "cpu"};
 			total_meter = Draw::Meter{min(14, max(3, b_width - 16)), "cpu"};
@@ -1277,22 +1293,25 @@ namespace Npu {
 			temp_graph = Draw::Graph{5, 1, "temp", npu.temp, graph_symbol, false, false, npu.temp_max, -23};
 		}
 
-		//? Per-core utilization, one row each with its own graph and meter
-		const int label_width = (core_count > 9 ? 6 : 5); // "NPU0 " or "NPU10 "
+		//? One row per SoC core, then the accelerator card, each with its own graph and meter
+		const int label_width = row_label_width();
 		const int label_x = x + 1;
 		const int graph_x = label_x + label_width;
 		const int meter_x = graph_x + core_graph_width + 1;
 		const int percent_x = meter_x + core_meter_width + 1;
-		for (int i = 0; i < core_count and i < height - 2; i++) {
-			const auto core_percent = safeVal(npu.core_percent, i).back();
-			const auto core_color = Theme::g("cpu").at(clamp(core_percent, 0ll, 100ll));
-			out += Mv::to(y + 1 + i, label_x) + Theme::c("main_fg") + Fx::b + "NPU" + to_string(i) + Fx::ub;
-			if (core_graph_width > 0 and i < static_cast<int>(core_graphs.size())) {
+		for (int i = 0; i < row_count and i < height - 2; i++) {
+			const bool card_row = (i >= core_count);
+			const auto& row_percent = (card_row ? npu.card_percent : safeVal(npu.core_percent, i));
+			const auto percent = row_percent.back();
+			const auto color = Theme::g("cpu").at(clamp(percent, 0ll, 100ll));
+			out += Mv::to(y + 1 + i, label_x) + Theme::c("main_fg") + Fx::b
+				+ (card_row ? Npu::card_name : "NPU" + to_string(i)) + Fx::ub;
+			if (core_graph_width > 0 and i < static_cast<int>(row_graphs.size())) {
 				out += Mv::to(y + 1 + i, graph_x) + Theme::c("inactive_fg") + graph_bg * core_graph_width
-					+ Mv::to(y + 1 + i, graph_x) + core_color + core_graphs.at(i)(safeVal(npu.core_percent, i), redraw_all);
+					+ Mv::to(y + 1 + i, graph_x) + color + row_graphs.at(i)(row_percent, redraw_all);
 			}
-			out += Mv::to(y + 1 + i, meter_x) + core_meter(static_cast<int>(core_percent));
-			out += Mv::to(y + 1 + i, percent_x) + core_color + rjust(to_string(core_percent), 4) + Theme::c("main_fg") + '%';
+			out += Mv::to(y + 1 + i, meter_x) + core_meter(static_cast<int>(percent));
+			out += Mv::to(y + 1 + i, percent_x) + color + rjust(to_string(percent), 4) + Theme::c("main_fg") + '%';
 		}
 
 		//? Clock speed as the statistics box title
@@ -1302,7 +1321,7 @@ namespace Npu {
 				+ Symbols::title_left + Fx::b + Theme::c("title") + freq_string + " MHz" + Fx::ub + Theme::c("div_line") + Symbols::title_right;
 		}
 
-		//? Utilization averaged over all cores, with the temperature graph beside it
+		//? Utilization averaged over every row, with the temperature graph beside it
 		int stats_row = 1;
 		out += Mv::to(b_y + stats_row, b_x + 1) + Theme::c("main_fg") + Fx::b + "ALL " + total_meter(static_cast<int>(total))
 			+ Theme::g("cpu").at(clamp(total, 0ll, 100ll)) + rjust(to_string(total), 4) + Theme::c("main_fg") + '%';
@@ -2596,7 +2615,7 @@ namespace Draw {
 
 			//? Room between the borders and the statistics box for the label, graph, meter and percentage.
 			//? The percentage is five wide and must stop one column short of the border it abuts.
-			const int label_width = (Npu::count > 9 ? 6 : 5);
+			const int label_width = row_label_width();
 			core_meter_width = min(12, max(4, (b_x - x) / 5));
 			core_graph_width = max(0, b_x - x - 1 - label_width - core_meter_width - 7);
 
